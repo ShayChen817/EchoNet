@@ -42,7 +42,9 @@ function renderNodes(nodes) {
   const ul = document.createElement('ul');
   nodes.forEach(n => {
     const li = document.createElement('li');
-    li.textContent = `${n.id} — ${n.url} — skills: ${ (n.skills||[]).join(',') }`;
+    const online = n.url ? true : false;
+    const status = online ? 'online' : 'offline';
+    li.innerHTML = `<strong>${escapeHtml(n.id)}</strong> — ${escapeHtml(n.url||'n/a')} — skills: ${ escapeHtml((n.skills||[]).join(',')) } <span class="node-status ${status}">${status}</span>`;
     ul.appendChild(li);
   });
   nodesListEl.appendChild(ul);
@@ -58,9 +60,11 @@ function renderNodes(nodes) {
     const batteryText = n.battery !== undefined && n.battery !== null ? `${n.battery}` : 'n/a';
     const loadText = n.load !== undefined && n.load !== null ? `${n.load}` : 'n/a';
     const healthText = n.health !== undefined && n.health !== null ? `${(n.health*100).toFixed(0)}%` : 'n/a';
+    const online = n.url ? true : false;
+    const statusClass = online ? 'status-green' : 'status-red';
     card.innerHTML = `
-      <h3>${label} (${n.id})</h3>
-      <div class="meta">${n.url}</div>
+      <h3><span class="status-dot ${statusClass}"></span> ${label} (${n.id})</h3>
+      <div class="meta">${n.url || 'n/a'}</div>
       <div class="meta metrics">CPU: ${cpuText} • Battery: ${batteryText} • Load: ${loadText} • Health: ${healthText}</div>
       <div class="tasks" id="tasks-${n.id}"></div>
       <div class="node-logs" id="logs-${n.id}"><h4>实时日志</h4></div>
@@ -216,12 +220,22 @@ dispatchAllBtn.addEventListener('click', async () => {
     if (!r.ok) throw new Error(JSON.stringify(js));
     log('Submit successful, task_id=' + js.task_id);
     alert('Submit successful, task_id=' + js.task_id);
-    // 显示 final_state（如果后端同步返回）
+    // 显示 final_state（如果后端同步返回）——以通用 JSON 格式展示
     if (js.final_state) {
-      const en = js.final_state.english_poem || '(无)';
-      const zh = js.final_state.chinese_poem || '(无)';
-      document.getElementById('englishPoem').textContent = en;
-      document.getElementById('chinesePoem').textContent = zh;
+      const fs = js.final_state;
+      try {
+        document.getElementById('finalStateJson').textContent = JSON.stringify(fs, null, 2);
+      } catch (e) {
+        document.getElementById('finalStateJson').textContent = String(fs);
+      }
+      // 如果有 ai_result 或其他显著字段，放到 highlights 中以便快速查看
+      const highlights = document.getElementById('finalHighlights');
+      highlights.innerHTML = '';
+      if (fs.ai_result) {
+        const h = document.createElement('div');
+        h.innerHTML = `<h4>AI Result</h4><pre>${escapeHtml(String(fs.ai_result))}</pre>`;
+        highlights.appendChild(h);
+      }
       log('final_state 已显示在页面');
     }
     // 如果后端返回 pipeline（包含 executed_by），显示执行分工
@@ -299,3 +313,44 @@ setInterval(async () => {
     // ignore polling errors
   }
 }, 3000);
+
+// --- Chat UI logic ---
+const chatBox = document.getElementById('chatBox');
+const chatInput = document.getElementById('chatInput');
+const chatSend = document.getElementById('chatSend');
+
+function appendChatMessage(who, text) {
+  const m = document.createElement('div');
+  m.className = 'chat-message ' + (who === 'user' ? 'chat-user' : 'chat-assistant');
+  m.innerHTML = `<div class="who">${escapeHtml(who)}</div><div class="msg">${escapeHtml(text)}</div>`;
+  chatBox.appendChild(m);
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+chatSend.addEventListener('click', async () => {
+  const txt = chatInput.value.trim();
+  if (!txt) return;
+  appendChatMessage('user', txt);
+  chatInput.value = '';
+  // send as ai_execute pipeline
+  const token = tokenEl.value.trim();
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['X-User-Token'] = token;
+  try {
+    const r = await fetch('/task', { method: 'POST', headers, body: JSON.stringify({ pipeline: [{ op: 'ai_execute', params: { prompt: txt, output_key: 'ai_result' } }] }) });
+    const js = await r.json();
+    if (!r.ok) throw new Error(JSON.stringify(js));
+    const res = js.final_state && js.final_state.ai_result ? js.final_state.ai_result : '(no result)';
+    appendChatMessage('assistant', String(res));
+  } catch (err) {
+    appendChatMessage('assistant', 'Error: ' + String(err));
+  }
+});
+
+// Allow Enter to send
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    chatSend.click();
+  }
+});

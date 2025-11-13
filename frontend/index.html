@@ -37,10 +37,18 @@
     <section id="final_result">
       <h2>执行结果</h2>
       <div id="finalState">
-        <strong>English Poem:</strong>
-        <pre id="englishPoem">（未生成）</pre>
-        <strong>Chinese Poem:</strong>
-        <pre id="chinesePoem">（未生成）</pre>
+        <strong>Final State (structured):</strong>
+        <pre id="finalStateJson">（无）</pre>
+        <div id="finalHighlights"></div>
+      </div>
+    </section>
+
+    <section id="chat_section">
+      <h2>交互式会话</h2>
+      <div id="chatBox" class="chat-box"></div>
+      <div class="chat-input">
+        <input id="chatInput" placeholder="在此输入问题或继续对话（例如：请解释上面的结果）" />
+        <button id="chatSend">发送</button>
       </div>
     </section>
 

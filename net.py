@@ -10,6 +10,8 @@ import socket
 import threading
 from zeroconf import Zeroconf, ServiceInfo, ServiceBrowser
 import copy
+import psutil
+import time
 
 # 从项目根目录的 .env 加载环境变量（不会把密钥写入源码）
 load_dotenv()
@@ -26,7 +28,28 @@ def root_index():
     return send_from_directory(frontend_dir, 'index.html')
 
 # ====== 读取配置 ======
-with open("nodes.json", "r", encoding="utf-8") as f:
+# 尝试在脚本目录及上级目录查找 nodes.json，以避免不同工作目录导致的 FileNotFoundError
+def _find_nodes_json():
+    candidates = []
+    script_dir = os.path.dirname(__file__)
+    candidates.append(os.path.join(script_dir, 'nodes.json'))
+    # parent directory
+    candidates.append(os.path.join(script_dir, '..', 'nodes.json'))
+    # workspace root (current working directory)
+    candidates.append(os.path.join(os.getcwd(), 'nodes.json'))
+    for p in candidates:
+        p_norm = os.path.normpath(p)
+        if os.path.exists(p_norm):
+            return p_norm
+    return candidates
+
+nodes_path = _find_nodes_json()
+if isinstance(nodes_path, list):
+    # none found
+    tried = '\n'.join([os.path.normpath(p) for p in nodes_path])
+    raise RuntimeError(f"nodes.json not found. Tried:\n{tried}\n\nEnsure nodes.json exists in the project root or the EchoNet folder, or run the script from the directory containing nodes.json.")
+
+with open(nodes_path, "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
 
 SELF_ID = CONFIG["self_id"]
@@ -109,9 +132,41 @@ def skill_translate_zh(state, params):
     state["chinese_poem"] = zh
     return state
 
+def skill_ai_execute(state, params):
+    """Generic AI execution skill: send `instruction` or `prompt` to OpenAI and store result.
+
+    params expected keys:
+      - prompt or instruction: string to send to the model
+      - output_key: where to store result in state (default 'ai_result')
+      - model: optional model name
+    """
+    instruction = params.get('instruction') or params.get('prompt') or ''
+    if not instruction:
+        state.setdefault('errors', []).append('ai_execute missing prompt')
+        return state
+    model = params.get('model', 'gpt-4o-mini')
+    try:
+        resp = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": instruction}],
+            temperature=params.get('temperature', 0.0),
+            max_tokens=params.get('max_tokens', 512),
+        )
+        out = resp.choices[0].message.content
+    except Exception as e:
+        out = f"(openai error) {e}"
+    key = params.get('output_key', 'ai_result')
+    # if key already exists and is dict/list, try to append; otherwise overwrite
+    if key in state and isinstance(state[key], list):
+        state[key].append(out)
+    else:
+        state[key] = out
+    return state
+
 SKILL_IMPL = {
     "generate_poem_en": skill_generate_poem_en,
     "translate_zh": skill_translate_zh,
+    "ai_execute": skill_ai_execute,
 }
 
 def self_skills():
@@ -127,6 +182,10 @@ def find_node_for_op(op):
     with NODES_LOCK:
         candidates = [n for n in NODES if op in n.get("skills", [])]
     if not candidates:
+        # 如果没有节点声明能执行该 op，但本地代码实现了该技能（SKILL_IMPL），
+        # 则回退为在本节点本地执行，方便像 ai_execute 这样的通用技能工作。
+        if op in SKILL_IMPL:
+            return {"id": SELF_ID, "url": SELF_URL, "skills": list(SELF_SKILL_SET)}
         return None
     # 简单：随便选第一个，后面可以做负载均衡
     return candidates[0]
@@ -247,6 +306,8 @@ def _all_allowed_ops():
     for n in NODES:
         for s in n.get("skills", []):
             ops.add(s)
+    # Always allow a generic ai execute op so model can request arbitrary AI work
+    ops.add('ai_execute')
     return ops
 
 
@@ -383,6 +444,15 @@ class DiscoveryListener:
         # 打印更详细的发现信息
         print(f"✨ FOUND NODE → {node_id} @ {node_ip}:{info.port}\n   skills:    {skills}\n   cpu:       {cpu}%\n   battery:   {battery}\n   load:      {load}\n   health:    {health}")
 
+    # handle updates to an existing service (e.g. metrics refreshed)
+    def update_service(self, zeroconf, service_type, name):
+        # on update, re-run the same logic as add_service to refresh stored node info
+        try:
+            self.add_service(zeroconf, service_type, name)
+        except Exception:
+            # be robust to transient errors
+            pass
+
     def remove_service(self, zeroconf, service_type, name):
         print(f"💦 Node disappeared: {name}")
         # best-effort removal: service name includes id
@@ -408,6 +478,40 @@ def start_advertising(port):
     ZC.register_service(info)
     ZC_INFO = info
     print(f"🐣 ADVERTISING: {SELF_ID} @ {ip}:{port}")
+
+    # helper to collect local metrics
+    def _get_metrics():
+        try:
+            cpu = psutil.cpu_percent(interval=0.1)
+        except Exception:
+            cpu = None
+        battery = None
+        try:
+            bat = psutil.sensors_battery()
+            battery = bat.percent if bat else None
+        except Exception:
+            battery = None
+        # placeholder load/health values
+        load = 0
+        health = 1.0
+        return {"cpu": cpu, "battery": battery, "load": load, "max_load": 10, "health": health}
+
+    # start a background updater to refresh metrics on the advertised service
+    def _updater():
+        try:
+            while True:
+                time.sleep(5)
+                try:
+                    m = _get_metrics()
+                    ZC_INFO.properties[b"metrics"] = json.dumps(m).encode('utf-8')
+                    ZC.update_service(ZC_INFO)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_updater, daemon=True)
+    t.start()
 
 
 def start_discovery():
@@ -476,9 +580,11 @@ def analyze():
         "You are an assistant that splits a user's high-level command into a sequence of small tasks.\n"
         "Return only a JSON object with the shape: { \"tasks\": [ { \"id\": string, \"op\": string, \"params\": object, \"target_node\": string }, ... ] }\n"
         "For each task, set \"target_node\" to one of the following node ids: " + ", ".join(node_ids) + ".\n"
-        "Ensure that the chosen target_node actually supports the requested operation (i.e., its skills include the op).\n"
-        "Use only these operations: " + ", ".join(allowed_ops) + ".\n"
+        "You may use any operation name if a node declares that skill.\n"
+        "If the work is generic AI work (not a node-specific skill), use the op name \"ai_execute\" and put an explanatory \"instruction\" or \"prompt\" string inside the task's \"params\".\n"
+        "Do not invent ops that no node can perform unless you use \"ai_execute\" so the system can run it via the generic AI skill.\n"
         "Do not include any code, commands, or explanation text—only the JSON.\n"
+        f"Context: nodes={json.dumps([{'id':n['id'],'skills':n.get('skills',[])} for n in NODES])}\n"
         f"User command: {command}\n"
     )
 
