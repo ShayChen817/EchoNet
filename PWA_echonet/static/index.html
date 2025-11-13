@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <meta name="theme-color" content="#000000">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="mobile-web-app-capable" content="yes">
+
+    <title>Echonet Dashboard 💕</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="manifest" href="manifest.json">
+</head>
+
+<body>
+    <h1>Echonet Dashboard 💖</h1>
+
+    <!-- Local device metrics -->
+    <div class="card">
+        <h2>Your Device</h2>
+        <p>CPU: <span id="cpu">loading...</span>%</p>
+        <p>Battery: <span id="battery">loading...</span>%</p>
+    </div>
+
+    <!-- Optional debug clock -->
+    <div class="card">
+        <h2>Debug Clock</h2>
+        <p id="clock">loading ...</p>
+    </div>
+
+    <!-- Node list -->
+    <div class="card">
+        <h2>Other Nodes on Network</h2>
+        <ul id="node-list"></ul>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
