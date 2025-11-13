@@ -13,6 +13,11 @@ nodesListEl.id = 'nodesList';
 const container = document.querySelector('.container');
 container.insertBefore(nodesListEl, document.getElementById('result'));
 
+// Chat elements
+const messagesEl = document.getElementById('messages');
+const chatInput = document.getElementById('chatInput');
+const chatSend = document.getElementById('chatSend');
+
 function log(msg) {
   const t = new Date().toLocaleTimeString();
   logArea.textContent += `[${t}] ${msg}\n`;
@@ -42,9 +47,7 @@ function renderNodes(nodes) {
   const ul = document.createElement('ul');
   nodes.forEach(n => {
     const li = document.createElement('li');
-    const online = n.url ? true : false;
-    const status = online ? 'online' : 'offline';
-    li.innerHTML = `<strong>${escapeHtml(n.id)}</strong> — ${escapeHtml(n.url||'n/a')} — skills: ${ escapeHtml((n.skills||[]).join(',')) } <span class="node-status ${status}">${status}</span>`;
+    li.textContent = `${n.id} — ${n.url} — skills: ${ (n.skills||[]).join(',') }`;
     ul.appendChild(li);
   });
   nodesListEl.appendChild(ul);
@@ -60,12 +63,11 @@ function renderNodes(nodes) {
     const batteryText = n.battery !== undefined && n.battery !== null ? `${n.battery}` : 'n/a';
     const loadText = n.load !== undefined && n.load !== null ? `${n.load}` : 'n/a';
     const healthText = n.health !== undefined && n.health !== null ? `${(n.health*100).toFixed(0)}%` : 'n/a';
-    const online = n.url ? true : false;
-    const statusClass = online ? 'status-green' : 'status-red';
     card.innerHTML = `
-      <h3><span class="status-dot ${statusClass}"></span> ${label} (${n.id})</h3>
-      <div class="meta">${n.url || 'n/a'}</div>
+      <h3>${label} (${n.id})</h3>
+      <div class="meta">${n.url}</div>
       <div class="meta metrics">CPU: ${cpuText} • Battery: ${batteryText} • Load: ${loadText} • Health: ${healthText}</div>
+      <div class="meta status"><span class="online-badge ${n.url? 'online':'offline'}">${n.url? '在线':'离线'}</span> <span id="last-${n.id}" class="last-update">最后更新：${new Date().toLocaleTimeString()}</span></div>
       <div class="tasks" id="tasks-${n.id}"></div>
       <div class="node-logs" id="logs-${n.id}"><h4>实时日志</h4></div>
     `;
@@ -190,6 +192,91 @@ function renderSubtasks(data) {
   });
 }
 
+function appendMessage(role, text) {
+  const el = document.createElement('div');
+  el.className = 'message ' + (role === 'user' ? 'user' : 'assistant');
+  el.textContent = text;
+  // ensure messagesEl exists (page might not have chat in older versions)
+  const msgs = document.getElementById('messages') || messagesEl;
+  if (msgs) {
+    msgs.appendChild(el);
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+}
+
+function formatFinalState(final_state) {
+  if (!final_state) return '（无返回）';
+  if (final_state.ai_result && final_state.ai_result.output) return final_state.ai_result.output;
+  // If poem fields present, render readable text
+  const en = final_state.english_poem;
+  const zh = final_state.chinese_poem;
+  if ((typeof en === 'string' && en.trim()) || (typeof zh === 'string' && zh.trim())) {
+    let out = '';
+    if (en && en.trim()) {
+      out += 'English:\n' + en.trim() + '\n\n';
+    }
+    if (zh && zh.trim()) {
+      out += '中文:\n' + zh.trim();
+    }
+    return out.trim();
+  }
+
+  // If small object, render key: value lines
+  if (typeof final_state === 'object') {
+    const keys = Object.keys(final_state);
+    if (keys.length > 0 && keys.length <= 10) {
+      return keys.map(k => `${k}: ${JSON.stringify(final_state[k])}`).join('\n');
+    }
+    return JSON.stringify(final_state, null, 2);
+  }
+  return String(final_state);
+}
+
+chatSend && chatSend.addEventListener('click', async () => {
+  const msg = (chatInput && chatInput.value || '').trim();
+  if (!msg) return;
+  const token = tokenEl.value.trim();
+  if (!token) { alert('请先填写 User Token（例如 testtoken123）以便提交请求'); return; }
+
+  appendMessage('user', msg);
+  chatInput.value = '';
+
+  // send as ai_execute pipeline to /task
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['X-User-Token'] = token;
+    const r = await fetch('/task', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ pipeline: [{ op: 'ai_execute', params: { prompt: msg } }] })
+    });
+    const js = await r.json();
+    if (!r.ok) throw new Error(JSON.stringify(js));
+
+    // format final_state into readable assistant text
+    const reply = formatFinalState(js.final_state);
+    appendMessage('assistant', reply);
+
+    // show task assignment in logs / node cards if pipeline present
+    if (js.pipeline && Array.isArray(js.pipeline)) {
+      js.pipeline.forEach((step, i) => {
+        const exec = step.executed_by || step.target_node || 'unknown';
+        addTaskToNode(exec, { op: step.op, params: step.params || {}, time: new Date().toLocaleTimeString() });
+      });
+    }
+  } catch (err) {
+    appendMessage('assistant', '请求失败：' + String(err));
+  }
+});
+
+// send on Enter
+chatInput && chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    chatSend.click();
+  }
+});
+
 // 提交整个 pipeline 给后端 /task（一次性）
 dispatchAllBtn.addEventListener('click', async () => {
   const tasks = Array.from(document.querySelectorAll('.task-card')).map((card, idx) => {
@@ -220,23 +307,22 @@ dispatchAllBtn.addEventListener('click', async () => {
     if (!r.ok) throw new Error(JSON.stringify(js));
     log('Submit successful, task_id=' + js.task_id);
     alert('Submit successful, task_id=' + js.task_id);
-    // 显示 final_state（如果后端同步返回）——以通用 JSON 格式展示
+    // 显示 final_state（如果后端同步返回）
     if (js.final_state) {
-      const fs = js.final_state;
-      try {
-        document.getElementById('finalStateJson').textContent = JSON.stringify(fs, null, 2);
-      } catch (e) {
-        document.getElementById('finalStateJson').textContent = String(fs);
+      // 如果页面存在聊天框，则把 final_state 的 ai_result 输出显示为助手回复
+      const msgs = document.getElementById('messages');
+      if (msgs) {
+        // format final_state into readable assistant text
+        const reply = formatFinalState(js.final_state);
+        appendMessage('assistant', reply);
+      } else {
+        // 兼容旧版页面：仅在元素存在时设置
+        const enEl = document.getElementById('englishPoem');
+        const zhEl = document.getElementById('chinesePoem');
+        if (enEl) enEl.textContent = js.final_state.english_poem || '(无)';
+        if (zhEl) zhEl.textContent = js.final_state.chinese_poem || '(无)';
+        log('final_state 已显示在页面');
       }
-      // 如果有 ai_result 或其他显著字段，放到 highlights 中以便快速查看
-      const highlights = document.getElementById('finalHighlights');
-      highlights.innerHTML = '';
-      if (fs.ai_result) {
-        const h = document.createElement('div');
-        h.innerHTML = `<h4>AI Result</h4><pre>${escapeHtml(String(fs.ai_result))}</pre>`;
-        highlights.appendChild(h);
-      }
-      log('final_state 已显示在页面');
     }
     // 如果后端返回 pipeline（包含 executed_by），显示执行分工
     if (js.pipeline && Array.isArray(js.pipeline)) {
@@ -252,6 +338,7 @@ dispatchAllBtn.addEventListener('click', async () => {
     alert('Submit failed: ' + err);
   }
 });
+
 
 function addTaskToNode(nodeId, task) {
   const container = document.getElementById(`tasks-${nodeId}`);
@@ -313,44 +400,3 @@ setInterval(async () => {
     // ignore polling errors
   }
 }, 3000);
-
-// --- Chat UI logic ---
-const chatBox = document.getElementById('chatBox');
-const chatInput = document.getElementById('chatInput');
-const chatSend = document.getElementById('chatSend');
-
-function appendChatMessage(who, text) {
-  const m = document.createElement('div');
-  m.className = 'chat-message ' + (who === 'user' ? 'chat-user' : 'chat-assistant');
-  m.innerHTML = `<div class="who">${escapeHtml(who)}</div><div class="msg">${escapeHtml(text)}</div>`;
-  chatBox.appendChild(m);
-  chatBox.scrollTop = chatBox.scrollHeight;
-}
-
-chatSend.addEventListener('click', async () => {
-  const txt = chatInput.value.trim();
-  if (!txt) return;
-  appendChatMessage('user', txt);
-  chatInput.value = '';
-  // send as ai_execute pipeline
-  const token = tokenEl.value.trim();
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['X-User-Token'] = token;
-  try {
-    const r = await fetch('/task', { method: 'POST', headers, body: JSON.stringify({ pipeline: [{ op: 'ai_execute', params: { prompt: txt, output_key: 'ai_result' } }] }) });
-    const js = await r.json();
-    if (!r.ok) throw new Error(JSON.stringify(js));
-    const res = js.final_state && js.final_state.ai_result ? js.final_state.ai_result : '(no result)';
-    appendChatMessage('assistant', String(res));
-  } catch (err) {
-    appendChatMessage('assistant', 'Error: ' + String(err));
-  }
-});
-
-// Allow Enter to send
-chatInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    chatSend.click();
-  }
-});
