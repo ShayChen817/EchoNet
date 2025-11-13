@@ -10,8 +10,11 @@ import socket
 import threading
 from zeroconf import Zeroconf, ServiceInfo, ServiceBrowser
 import copy
-import psutil
-import time
+try:
+    import psutil
+except Exception:
+    psutil = None
+    print('⚠️ psutil not available; install psutil to enable CPU/battery metrics (pip install psutil)')
 
 # 从项目根目录的 .env 加载环境变量（不会把密钥写入源码）
 load_dotenv()
@@ -26,35 +29,63 @@ def root_index():
     # Use an absolute path to be robust against different working directories
     frontend_dir = os.path.join(os.path.dirname(__file__), 'frontend')
     return send_from_directory(frontend_dir, 'index.html')
+# ====== 辅助：获取本机 IP ======
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+    return ip
 
-# ====== 读取配置 ======
-# 尝试在脚本目录及上级目录查找 nodes.json，以避免不同工作目录导致的 FileNotFoundError
-def _find_nodes_json():
+
+# ====== 读取配置（更健壮）：尝试在若干位置找到 nodes.json，否则回退到一个最小的默认配置 ======
+def _load_config():
     candidates = []
-    script_dir = os.path.dirname(__file__)
-    candidates.append(os.path.join(script_dir, 'nodes.json'))
-    # parent directory
-    candidates.append(os.path.join(script_dir, '..', 'nodes.json'))
-    # workspace root (current working directory)
+    here = os.path.dirname(__file__)
+    candidates.append(os.path.join(here, 'nodes.json'))
+    candidates.append(os.path.join(here, '..', 'nodes.json'))
     candidates.append(os.path.join(os.getcwd(), 'nodes.json'))
+    # Workspace root guess: two levels up from this file if possible
+    candidates.append(os.path.abspath(os.path.join(here, '..', '..', 'nodes.json')))
+    # absolute root of drive (unlikely, but harmless)
+    candidates.append(os.path.join(os.path.abspath(os.sep), 'nodes.json'))
+
     for p in candidates:
-        p_norm = os.path.normpath(p)
-        if os.path.exists(p_norm):
-            return p_norm
-    return candidates
+        try:
+            if p and os.path.exists(p):
+                with open(p, 'r', encoding='utf-8') as f:
+                    print(f"📁 Loaded nodes.json from {p}")
+                    return json.load(f)
+        except Exception:
+            continue
 
-nodes_path = _find_nodes_json()
-if isinstance(nodes_path, list):
-    # none found
-    tried = '\n'.join([os.path.normpath(p) for p in nodes_path])
-    raise RuntimeError(f"nodes.json not found. Tried:\n{tried}\n\nEnsure nodes.json exists in the project root or the EchoNet folder, or run the script from the directory containing nodes.json.")
+    # 如果都找不到，生成一个最小的默认配置以便本地运行
+    port = int(os.getenv('PORT', '5000'))
+    self_id = os.getenv('NODE_ID') or f"{socket.gethostname()}-{os.getpid()}"
+    ip = get_local_ip()
+    self_url = f"http://{ip}:{port}"
+    print('⚠️ nodes.json not found. Falling back to default minimal config.')
+    return {
+        'self_id': self_id,
+        'self_url': self_url,
+        'nodes': [
+            {'id': self_id, 'url': self_url, 'skills': []}
+        ]
+    }
 
-with open(nodes_path, "r", encoding="utf-8") as f:
-    CONFIG = json.load(f)
 
-SELF_ID = CONFIG["self_id"]
-SELF_URL = CONFIG["self_url"]
-NODES = CONFIG["nodes"]
+CONFIG = _load_config()
+
+SELF_ID = CONFIG['self_id']
+SELF_URL = CONFIG['self_url']
+NODES = CONFIG.get('nodes', [])
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
@@ -91,16 +122,7 @@ def _require_token(req):
     return token, None
 
 
-def get_local_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-    except Exception:
-        ip = "127.0.0.1"
-    finally:
-        s.close()
-    return ip
+# get_local_ip is defined earlier near config loading; reuse that implementation
 
 
 # Zeroconf globals
@@ -132,35 +154,42 @@ def skill_translate_zh(state, params):
     state["chinese_poem"] = zh
     return state
 
-def skill_ai_execute(state, params):
-    """Generic AI execution skill: send `instruction` or `prompt` to OpenAI and store result.
 
-    params expected keys:
-      - prompt or instruction: string to send to the model
-      - output_key: where to store result in state (default 'ai_result')
-      - model: optional model name
-    """
-    instruction = params.get('instruction') or params.get('prompt') or ''
-    if not instruction:
-        state.setdefault('errors', []).append('ai_execute missing prompt')
+def skill_ai_execute(state, params):
+    """通用 AI 执行器：接收 { prompt }，把模型返回写入 state['ai_result']。"""
+    # try several common keys for prompt-like content
+    prompt = None
+    for key in ('prompt', 'text', 'query', 'message', 'input'):
+        v = params.get(key)
+        if isinstance(v, str) and v.strip():
+            prompt = v.strip()
+            break
+    # fallback: check state for something useful
+    if not prompt:
+        for key in ('command', 'text', 'query', 'user_input'):
+            v = state.get(key)
+            if isinstance(v, str) and v.strip():
+                prompt = v.strip()
+                break
+    if not prompt:
+        state.setdefault('ai_result', {'error': 'no prompt provided (please include params.prompt or params.text)'} )
         return state
-    model = params.get('model', 'gpt-4o-mini')
+
     try:
         resp = openai_client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": instruction}],
-            temperature=params.get('temperature', 0.0),
-            max_tokens=params.get('max_tokens', 512),
+            model='gpt-4o-mini',
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=800,
         )
-        out = resp.choices[0].message.content
+        text = ''
+        try:
+            text = resp.choices[0].message.content
+        except Exception:
+            text = str(resp)
+        state['ai_result'] = {'output': text}
     except Exception as e:
-        out = f"(openai error) {e}"
-    key = params.get('output_key', 'ai_result')
-    # if key already exists and is dict/list, try to append; otherwise overwrite
-    if key in state and isinstance(state[key], list):
-        state[key].append(out)
-    else:
-        state[key] = out
+        state['ai_result'] = {'error': str(e)}
     return state
 
 SKILL_IMPL = {
@@ -182,10 +211,11 @@ def find_node_for_op(op):
     with NODES_LOCK:
         candidates = [n for n in NODES if op in n.get("skills", [])]
     if not candidates:
-        # 如果没有节点声明能执行该 op，但本地代码实现了该技能（SKILL_IMPL），
-        # 则回退为在本节点本地执行，方便像 ai_execute 这样的通用技能工作。
+        # 如果没有节点声明该技能，但当前进程实现了这个 op，则退回到本地执行
         if op in SKILL_IMPL:
-            return {"id": SELF_ID, "url": SELF_URL, "skills": list(SELF_SKILL_SET)}
+            for n in NODES:
+                if n.get('id') == SELF_ID:
+                    return n
         return None
     # 简单：随便选第一个，后面可以做负载均衡
     return candidates[0]
@@ -266,7 +296,7 @@ def execute_step():
     params = data.get("params", {})
     state = data.get("state", {})
 
-    if op not in SELF_SKILL_SET:
+    if op not in self_skills():
         return jsonify({"error": f"this node cannot handle {op}"}), 400
 
     impl = SKILL_IMPL.get(op)
@@ -282,7 +312,7 @@ def info():
     return jsonify({
         "id": SELF_ID,
         "url": SELF_URL,
-        "skills": list(SELF_SKILL_SET),
+        "skills": list(self_skills()),
     })
 
 
@@ -306,7 +336,7 @@ def _all_allowed_ops():
     for n in NODES:
         for s in n.get("skills", []):
             ops.add(s)
-    # Always allow a generic ai execute op so model can request arbitrary AI work
+    # 始终允许通用的 ai_execute 操作（后端可以本地处理任意请求）
     ops.add('ai_execute')
     return ops
 
@@ -428,7 +458,8 @@ class DiscoveryListener:
             return
 
         url = f"http://{node_ip}:{info.port}"
-        new_node = {"id": node_id, "url": url, "skills": skills, "cpu": cpu, "battery": battery, "load": load, "health": health}
+        now = __import__('time').strftime('%H:%M:%S', __import__('time').localtime())
+        new_node = {"id": node_id, "url": url, "skills": skills, "cpu": cpu, "battery": battery, "load": load, "health": health, 'last_seen': now}
 
         with NODES_LOCK:
             # replace or append
@@ -444,13 +475,11 @@ class DiscoveryListener:
         # 打印更详细的发现信息
         print(f"✨ FOUND NODE → {node_id} @ {node_ip}:{info.port}\n   skills:    {skills}\n   cpu:       {cpu}%\n   battery:   {battery}\n   load:      {load}\n   health:    {health}")
 
-    # handle updates to an existing service (e.g. metrics refreshed)
     def update_service(self, zeroconf, service_type, name):
-        # on update, re-run the same logic as add_service to refresh stored node info
+        # 当服务更新时，重新读取 service info 并刷新节点信息（复用 add_service）
         try:
             self.add_service(zeroconf, service_type, name)
         except Exception:
-            # be robust to transient errors
             pass
 
     def remove_service(self, zeroconf, service_type, name):
@@ -465,7 +494,7 @@ def start_advertising(port):
     ip = get_local_ip()
     props = {
         "id": SELF_ID,
-        "skills": json.dumps(list(SELF_SKILL_SET))
+        "skills": json.dumps(list(self_skills()))
     }
     info = ServiceInfo(
         "_echotest._tcp.local.",
@@ -479,38 +508,83 @@ def start_advertising(port):
     ZC_INFO = info
     print(f"🐣 ADVERTISING: {SELF_ID} @ {ip}:{port}")
 
-    # helper to collect local metrics
-    def _get_metrics():
-        try:
-            cpu = psutil.cpu_percent(interval=0.1)
-        except Exception:
-            cpu = None
-        battery = None
-        try:
-            bat = psutil.sensors_battery()
-            battery = bat.percent if bat else None
-        except Exception:
-            battery = None
-        # placeholder load/health values
-        load = 0
-        health = 1.0
-        return {"cpu": cpu, "battery": battery, "load": load, "max_load": 10, "health": health}
 
-    # start a background updater to refresh metrics on the advertised service
-    def _updater():
-        try:
-            while True:
-                time.sleep(5)
+def _collect_metrics_once():
+    """Collect simple runtime metrics (cpu%, battery%, load, health)."""
+    cpu = None
+    battery = None
+    load = None
+    health = None
+    try:
+        if psutil:
+            cpu = round(psutil.cpu_percent(interval=0.1), 1)
+            # battery may be None on desktops/servers
+            try:
+                batt = psutil.sensors_battery()
+                battery = round(batt.percent, 1) if batt and batt.percent is not None else None
+            except Exception:
+                battery = None
+            # represent load as current percent / 100
+            load = cpu
+            # simple health heuristic: if cpu < 80 -> good, else degraded
+            health = max(0.0, min(1.0, (100.0 - cpu) / 100.0)) if cpu is not None else None
+        else:
+            cpu = None
+    except Exception:
+        cpu = battery = load = health = None
+    return {'cpu': cpu, 'battery': battery, 'load': load, 'health': health}
+
+
+def start_metrics_updater(interval=3):
+    """Background thread: update local NODES entry and advertised Zeroconf properties with metrics every `interval` seconds."""
+    def run():
+        while True:
+            try:
+                m = _collect_metrics_once()
+                now = __import__('time').strftime('%H:%M:%S', __import__('time').localtime())
+                with NODES_LOCK:
+                    # update local node entry if present
+                    found = False
+                    for i, n in enumerate(NODES):
+                        if n.get('id') == SELF_ID:
+                            NODES[i].update({'cpu': m['cpu'], 'battery': m['battery'], 'load': f"{m['load']} / 100" if m['load'] is not None else None, 'health': m['health'], 'last_seen': now})
+                            found = True
+                            break
+                    if not found:
+                        # add minimal local node entry
+                        NODES.append({'id': SELF_ID, 'url': SELF_URL, 'skills': list(self_skills()), 'cpu': m['cpu'], 'battery': m['battery'], 'load': f"{m['load']} / 100" if m['load'] is not None else None, 'health': m['health'], 'last_seen': now})
+
+                # update zeroconf advertised properties if available
                 try:
-                    m = _get_metrics()
-                    ZC_INFO.properties[b"metrics"] = json.dumps(m).encode('utf-8')
-                    ZC.update_service(ZC_INFO)
+                    global ZC_INFO
+                    if ZC is not None and ZC_INFO is not None:
+                        props = dict(ZC_INFO.properties or {})
+                        props['id'] = SELF_ID
+                        props['skills'] = json.dumps(list(self_skills()))
+                        props['metrics'] = json.dumps({'cpu': m['cpu'], 'battery': m['battery'], 'load': m['load'], 'max_load': 100, 'health': m['health']})
+                        # attempt to update existing ServiceInfo
+                        try:
+                            ZC_INFO.properties = props
+                            ZC.update_service(ZC_INFO)
+                        except Exception:
+                            try:
+                                ip = socket.inet_aton(get_local_ip())
+                                new_info = ServiceInfo(ZC_INFO.type_, ZC_INFO.name, addresses=[ip], port=ZC_INFO.port, properties=props, server=ZC_INFO.server)
+                                ZC.update_service(new_info)
+                                ZC_INFO = new_info
+                            except Exception:
+                                pass
                 except Exception:
                     pass
-        except Exception:
-            pass
 
-    t = threading.Thread(target=_updater, daemon=True)
+            except Exception:
+                pass
+            try:
+                __import__('time').sleep(interval)
+            except Exception:
+                break
+
+    t = threading.Thread(target=run, daemon=True)
     t.start()
 
 
@@ -580,11 +654,9 @@ def analyze():
         "You are an assistant that splits a user's high-level command into a sequence of small tasks.\n"
         "Return only a JSON object with the shape: { \"tasks\": [ { \"id\": string, \"op\": string, \"params\": object, \"target_node\": string }, ... ] }\n"
         "For each task, set \"target_node\" to one of the following node ids: " + ", ".join(node_ids) + ".\n"
-        "You may use any operation name if a node declares that skill.\n"
-        "If the work is generic AI work (not a node-specific skill), use the op name \"ai_execute\" and put an explanatory \"instruction\" or \"prompt\" string inside the task's \"params\".\n"
-        "Do not invent ops that no node can perform unless you use \"ai_execute\" so the system can run it via the generic AI skill.\n"
+        "Ensure that the chosen target_node actually supports the requested operation (i.e., its skills include the op).\n"
+        "Use only these operations: " + ", ".join(allowed_ops) + ".\n"
         "Do not include any code, commands, or explanation text—only the JSON.\n"
-        f"Context: nodes={json.dumps([{'id':n['id'],'skills':n.get('skills',[])} for n in NODES])}\n"
         f"User command: {command}\n"
     )
 
@@ -643,6 +715,11 @@ if __name__ == "__main__":
     try:
         start_advertising(port)
         start_discovery()
+        # start periodic metrics updater (updates local NODES entry and advertised props)
+        try:
+            start_metrics_updater(interval=3)
+        except Exception as e:
+            print('metrics updater failed to start:', e)
     except Exception as e:
         print('Zeroconf start failed:', e)
 
