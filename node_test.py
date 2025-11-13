@@ -1,7 +1,6 @@
 import time
 import json
 import socket
-import psutil
 from zeroconf import Zeroconf, ServiceInfo, ServiceBrowser
 
 # ----------------------------
@@ -9,7 +8,7 @@ from zeroconf import Zeroconf, ServiceInfo, ServiceBrowser
 # ----------------------------
 NODE_ID = "nodeA"   # change to "nodeB" on the second laptop
 PORT = 9999
-SKILLS = ["test-skill"]
+SKILLS = ["test-skill", "ai_execute"]
 
 # Maximum "weight" this device can handle (your decision)
 MAX_LOAD = 10
@@ -103,28 +102,30 @@ def advertise():
     """Advertise node metrics via Zeroconf."""
     zc = Zeroconf()
     ip = get_local_ip()
-    # include runtime metrics in properties so listeners can display cpu/battery/load/health
-    def _get_metrics():
-        try:
-            cpu = psutil.cpu_percent(interval=0.1)
-        except Exception:
-            cpu = None
-        battery = None
-        try:
-            bat = psutil.sensors_battery()
-            battery = bat.percent if bat else None
-        except Exception:
-            battery = None
-        # current_load is a simple placeholder here
-        load = current_load
-        health = compute_health(cpu or 0, battery, load)
-        return {"cpu": cpu, "battery": battery, "load": load, "max_load": MAX_LOAD, "health": health}
+
+    # include a metrics blob so discoverers can show CPU/battery/load/health
+    try:
+        import psutil
+    except Exception:
+        psutil = None
+
+    metrics = None
+    try:
+        if psutil:
+            cpu = round(psutil.cpu_percent(interval=0.1), 1)
+            try:
+                batt = psutil.sensors_battery()
+                battery = round(batt.percent, 1) if batt and batt.percent is not None else None
+            except Exception:
+                battery = None
+            metrics = {'cpu': cpu, 'battery': battery, 'load': current_load, 'max_load': MAX_LOAD, 'health': 1.0}
+    except Exception:
+        metrics = None
 
     props = {
         "id": NODE_ID,
         "skills": json.dumps(SKILLS),
-        # metrics as JSON string; Zeroconf properties are bytes underneath
-        "metrics": json.dumps(_get_metrics())
+        "metrics": json.dumps(metrics) if metrics is not None else None
     }
 
     info = ServiceInfo(
@@ -138,28 +139,6 @@ def advertise():
 
     zc.register_service(info)
     print(f"🐣 ADVERTISING: {NODE_ID} @ {ip}:{PORT}")
-
-    # Periodically update metrics in the registered service
-    def _updater():
-        try:
-            while True:
-                time.sleep(5)
-                try:
-                    metrics = _get_metrics()
-                    # set as bytes for Zeroconf properties
-                    info.properties[b"metrics"] = json.dumps(metrics).encode('utf-8')
-                    zc.update_service(info)
-                except Exception:
-                    # ignore per-iteration errors
-                    pass
-        finally:
-            try:
-                zc.unregister_service(info)
-            except Exception:
-                pass
-
-    t = threading.Thread(target=_updater, daemon=True)
-    t.start()
 
     return zc, info
 
