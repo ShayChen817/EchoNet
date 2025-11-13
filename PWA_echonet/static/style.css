@@ -1,7 +1,8 @@
 body {
-    font-family: sans-serif;
     background: #111;
-    color: #fff;
+    color: #eee;
+    font-family: Arial, sans-serif;
+    margin: 0;
     padding: 20px;
 }
 
@@ -13,11 +14,23 @@ h1 {
 .card {
     background: #222;
     padding: 15px;
-    border-radius: 12px;
     margin-bottom: 20px;
-    box-shadow: 0 0 10px #444;
+    border-radius: 8px;
+    border: 1px solid #333;
 }
 
-ul li {
-    margin: 6px 0;
+.node-box {
+    background: #333;
+    padding: 10px;
+    margin-bottom: 10px;
+    border-radius: 6px;
+}
+
+.debug-box {
+    background: #000;
+    padding: 8px;
+    height: 200px;
+    overflow-y: scroll;
+    border-radius: 8px;
+    border: 1px solid #444;
 }
