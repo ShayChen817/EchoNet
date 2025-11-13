@@ -1,36 +1,36 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8" />
-    <meta name="theme-color" content="#000000">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
     <title>Echonet Dashboard 💕</title>
+
     <link rel="stylesheet" href="style.css">
+
+    <meta name="theme-color" content="#000000">
     <link rel="manifest" href="manifest.json">
 </head>
 
 <body>
     <h1>Echonet Dashboard 💖</h1>
 
-    <!-- Local device metrics -->
     <div class="card">
         <h2>Your Device</h2>
-        <p>CPU: <span id="cpu">loading...</span>%</p>
-        <p>Battery: <span id="battery">loading...</span>%</p>
+        <p><strong>CPU:</strong> <span id="cpu">loading...</span>%</p>
+        <p><strong>Battery:</strong> <span id="battery">loading...</span>%</p>
+        <p><strong>Load:</strong> <span id="load">loading...</span></p>
+        <p><strong>Health:</strong> <span id="health">loading...</span></p>
     </div>
 
-    <!-- Optional debug clock -->
-    <div class="card">
-        <h2>Debug Clock</h2>
-        <p id="clock">loading ...</p>
-    </div>
-
-    <!-- Node list -->
     <div class="card">
         <h2>Other Nodes on Network</h2>
         <ul id="node-list"></ul>
+    </div>
+
+    <div class="card">
+        <h2>Debug Log</h2>
+        <pre id="debug" class="debug-box"></pre>
     </div>
 
     <script src="app.js"></script>
