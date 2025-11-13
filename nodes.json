@@ -1,0 +1,11 @@
+{
+  "self_id": "node1",
+  "self_url": "http://127.0.0.1:5000",
+  "nodes": [
+    {
+      "id": "node1",
+      "url": "http://127.0.0.1:5000",
+      "skills": ["generate_poem_en", "translate_zh"]
+    }
+  ]
+}

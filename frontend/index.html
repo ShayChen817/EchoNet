@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Echonet — 命令拆分前端</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="container">
+    <h1>Echonet — Task Splitter (UI Prototype)</h1>
+
+    <label for="command">Enter a command or task description:</label>
+    <textarea id="command" placeholder="e.g. Generate an English poem about autumn and translate it into Chinese"></textarea>
+
+    <label for="fileUpload">Or upload a text file with a command (optional):</label>
+    <input type="file" id="fileUpload" accept="text/*" />
+
+    <div class="controls">
+      <label for="token">User Token:</label>
+      <input id="token" placeholder="X-User-Token (e.g. testtoken123)" />
+      <button id="analyzeBtn">Analyze</button>
+      <button id="dispatchAllBtn" disabled>Dispatch All</button>
+      <label class="mock">Use Mock Responses <input type="checkbox" id="mockToggle" /></label>
+    </div>
+
+    <section id="result">
+      <h2>拆分结果</h2>
+      <div id="subtasks"></div>
+    </section>
+
+    <section id="nodes_section">
+      <h2>节点卡片（已处理任务 / 日志）</h2>
+      <div id="nodeCards" class="node-cards"></div>
+    </section>
+
+    <section id="final_result">
+      <h2>执行结果</h2>
+      <div id="finalState">
+        <strong>English Poem:</strong>
+        <pre id="englishPoem">（未生成）</pre>
+        <strong>Chinese Poem:</strong>
+        <pre id="chinesePoem">（未生成）</pre>
+      </div>
+    </section>
+
+    <section id="logs">
+      <h2>日志</h2>
+      <pre id="logArea"></pre>
+    </section>
+
+    <footer>
+      <small>前端原型：会向后端 POST /analyze 获取拆分任务，随后可对单个子任务调用 /task 或 /execute_step 进行派发。</small>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
