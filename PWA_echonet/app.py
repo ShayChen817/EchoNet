@@ -171,3 +171,144 @@ class DiscoveryListener:
         node_id = None
         try:
             # Try to get properties first
+            info = zc.get_service_info(service_type, name)
+            if info and b"id" in info.properties:
+                node_id = info.properties[b"id"].decode()
+        except Exception:
+            node_id = None
+
+        # Fallback: parse from instance name, e.g. "nodeA._echotest._tcp.local."
+        if not node_id:
+            try:
+                instance = name.split(".")[0]  # "nodeA"
+                node_id = instance
+            except Exception:
+                pass
+
+        if not node_id:
+            return
+
+        with NODES_LOCK:
+            if node_id in DISCOVERED_NODES:
+                del DISCOVERED_NODES[node_id]
+                print(f"❌ NODE DISCONNECTED → {node_id}")
+
+
+# ----------------------------
+# ADVERTISER THREAD
+# ----------------------------
+def advertiser_thread():
+    zc = Zeroconf(ip_version=4)
+    ip = get_local_ip()
+
+    props = {
+        "id": NODE_ID,
+        "skills": json.dumps(SKILLS),
+        "metrics": json.dumps(get_node_metrics()),
+    }
+
+    info = ServiceInfo(
+        "_echotest._tcp.local.",
+        f"{NODE_ID}._echotest._tcp.local.",
+        addresses=[socket.inet_aton(ip)],
+        port=PORT,
+        properties=props,
+        server=f"{NODE_ID}.local.",  # important for Windows reliability
+    )
+
+    zc.register_service(info)
+    print(f"📡 Advertising node {NODE_ID} on {ip}:{PORT}")
+
+    while True:
+        # Refresh metrics
+        metrics = json.dumps(get_node_metrics()).encode()
+        info.properties[b"metrics"] = metrics
+
+        try:
+            zc.update_service(info)
+        except Exception:
+            # Windows fallback: rebuild service
+            print("⚠️ Rebuilding ServiceInfo for stability")
+            new_info = ServiceInfo(
+                "_echotest._tcp.local.",
+                f"{NODE_ID}._echotest._tcp.local.",
+                addresses=[socket.inet_aton(get_local_ip())],
+                port=PORT,
+                properties=info.properties,
+                server=f"{NODE_ID}.local.",
+            )
+            try:
+                zc.register_service(new_info)
+                info = new_info
+            except Exception as e:
+                print(f"Error re-registering service: {e}")
+
+        time.sleep(3)
+
+
+# ----------------------------
+# FLASK ROUTES
+# ----------------------------
+@app.route("/")
+def serve_index():
+    return app.send_static_file("index.html")
+
+
+@app.get("/info")
+def info():
+    """Return this phone node's own metrics."""
+    return jsonify(get_node_metrics())
+
+
+@app.get("/nodes")
+def get_nodes():
+    """Return list of discovered nodes (non-stale)."""
+    now = time.time()
+    with NODES_LOCK:
+        stale_ids = [
+            nid
+            for nid, n in DISCOVERED_NODES.items()
+            if now - n["timestamp"] > STALE_TIME
+        ]
+        for nid in stale_ids:
+            print(f"⏱ Removing stale node → {nid}")
+            del DISCOVERED_NODES[nid]
+
+        nodes_list = list(DISCOVERED_NODES.values())
+
+    return jsonify(nodes_list)
+
+
+@app.route("/<path:path>")
+def serve_static(path):
+    return send_from_directory("static", path)
+
+
+# ----------------------------
+# MAIN APP EXECUTION
+# ----------------------------
+if __name__ == "__main__":
+    # Start advertiser
+    threading.Thread(target=advertiser_thread, daemon=True).start()
+
+    # Start Flask in background
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False),
+        daemon=True,
+    )
+    flask_thread.start()
+
+    time.sleep(1)
+
+    # Start discovery
+    zc = Zeroconf(ip_version=4)
+    ServiceBrowser(zc, "_echotest._tcp.local.", DiscoveryListener())
+
+    print("\n🔥 All systems running...\n")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopping phoneNode…")
+        zc.close()
