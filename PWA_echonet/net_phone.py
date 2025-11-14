@@ -88,4 +88,4 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     print(f"📱 Phone client running at http://0.0.0.0:{port}")
     print(f"➡️ Forwarding tasks to: {CLUSTER_ENTRY}")
-    app.run(host="0.0.0.0
+    app.run(host="0.0.0.0", port=port)
