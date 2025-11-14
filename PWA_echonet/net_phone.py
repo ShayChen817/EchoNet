@@ -276,4 +276,28 @@ def serve_static(path):
     return send_from_directory("static", path)
 
 
-# ---
+# ----------------------------
+# MAIN
+# ----------------------------
+if __name__ == "__main__":
+    threading.Thread(target=advertiser_thread, daemon=True).start()
+
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False),
+        daemon=True,
+    )
+    flask_thread.start()
+
+    time.sleep(1)
+
+    zc = Zeroconf(ip_version=4)
+    ServiceBrowser(zc, "_echotest._tcp.local.", DiscoveryListener())
+
+    print("\n🔥 PhoneNode running… discovering cluster…\n")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopping phoneNode…")
+        zc.close()
