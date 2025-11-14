@@ -7,8 +7,10 @@ from zeroconf import Zeroconf, ServiceInfo, ServiceBrowser
 # CHANGE THIS PER DEVICE
 # ----------------------------
 NODE_ID = "nodeA"   # change to "nodeB" on the second laptop
-PORT = 9999
-SKILLS = ["test-skill", "ai_execute"]
+# Use the same HTTP port as net.py by default for easier testing
+PORT = 5000
+# Recommend skills that match keys in net.py's SKILL_IMPL
+SKILLS = ["generate_poem_en", "translate_zh", "ai_execute"]
 
 # Maximum "weight" this device can handle (your decision)
 MAX_LOAD = 10
