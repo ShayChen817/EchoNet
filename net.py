@@ -267,20 +267,39 @@ def handle_task():
                 return jsonify({"error": f"skill {op} not implemented on this node"}), 500
             state = impl(state, params)
         else:
-            # 交给别的节点执行这一步
-            url = target_node["url"].rstrip('/') + "/execute_step"
-            payload = {
-                "op": op,
-                "params": params,
-                "state": state,
-            }
-            try:
-                resp = requests.post(url, json=payload, timeout=60)
-            except Exception as e:
-                return jsonify({"error": f"remote node {target_node['id']} failed to connect", "detail": str(e)}), 500
-            if resp.status_code != 200:
-                return jsonify({"error": f"remote node {target_node['id']} failed", "detail": resp.text}), 500
-            state = resp.json()["state"]
+            # 交给别的节点执行这一步：
+            # 首先优先使用远端声明的 execute_step（如果目标声明了该 op），
+            # 否则回退到远端的 /run_prompt，让远端使用 ai_execute 或其内部逻辑处理自然语言提示。
+            remote_base = target_node["url"].rstrip('/')
+            # 如果目标节点声明了该技能，尽量调用 execute_step
+            if op in target_node.get('skills', []):
+                url = remote_base + "/execute_step"
+                payload = {"op": op, "params": params, "state": state}
+                try:
+                    resp = requests.post(url, json=payload, timeout=60)
+                except Exception as e:
+                    return jsonify({"error": f"remote node {target_node['id']} failed to connect to execute_step", "detail": str(e)}), 500
+                if resp.status_code != 200:
+                    return jsonify({"error": f"remote node {target_node['id']} failed execute_step", "detail": resp.text}), 500
+                try:
+                    state = resp.json().get("state", state)
+                except Exception:
+                    return jsonify({"error": "invalid JSON from remote execute_step", "detail": resp.text}), 502
+            else:
+                # 回退：构造一个简短的 prompt 发给远端 /run_prompt
+                url = remote_base + "/run_prompt"
+                prompt = f"Perform operation '{op}' with params {json.dumps(params)} on the provided state and return the full updated state as JSON."
+                payload = {"prompt": prompt, "state": state, "op": op, "params": params}
+                try:
+                    resp = requests.post(url, json=payload, timeout=60)
+                except Exception as e:
+                    return jsonify({"error": f"remote node {target_node['id']} failed to connect (run_prompt)", "detail": str(e)}), 500
+                if resp.status_code != 200:
+                    return jsonify({"error": f"remote node {target_node['id']} failed run_prompt", "detail": resp.text}), 500
+                try:
+                    state = resp.json().get("state", state)
+                except Exception:
+                    return jsonify({"error": "invalid JSON from remote run_prompt", "detail": resp.text}), 502
 
     # 保存并返回 task_id 与最终状态
     TASK_STORE[task_id]['final_state'] = state
@@ -304,6 +323,28 @@ def execute_step():
         return jsonify({"error": f"skill {op} not implemented in code"}), 500
 
     state = impl(state, params)
+    return jsonify({"state": state})
+
+
+@app.route("/run_prompt", methods=["POST"])
+def run_prompt():
+    """Accepts { prompt: str, state: object } and runs the node's `ai_execute` on it.
+    This provides a simple fallback so nodes that don't implement a specific op
+    can still receive a natural-language instruction and update state.
+    """
+    data = request.json or {}
+    prompt = data.get("prompt")
+    state = data.get("state", {})
+
+    if not isinstance(prompt, str) or not prompt.strip():
+        return jsonify({"error": "missing prompt"}), 400
+
+    # Reuse the local generic AI executor
+    try:
+        state = skill_ai_execute(state, {"prompt": prompt})
+    except Exception as e:
+        return jsonify({"error": "ai_execute failed", "detail": str(e)}), 500
+
     return jsonify({"state": state})
 
 # ====== 查看节点信息 ======
