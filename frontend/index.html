@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Echonet — 命令拆分前端</title>
+  <title>Echonet — Task Splitter Frontend</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -25,33 +25,33 @@
     </div>
 
     <section id="result">
-      <h2>拆分结果</h2>
+      <h2>Analysis Results</h2>
       <div id="subtasks"></div>
     </section>
 
     <section id="nodes_section">
-      <h2>节点卡片（已处理任务 / 日志）</h2>
+      <h2>Node Cards (Completed Tasks / Logs)</h2>
       <div id="nodeCards" class="node-cards"></div>
     </section>
 
     <section id="final_result">
-      <h2>助手对话</h2>
+      <h2>Assistant Conversation</h2>
       <div id="chat" class="chat">
         <div id="messages" class="messages"></div>
         <div class="chat-input">
-          <input id="chatInput" placeholder="向助手提问（例如：帮我总结下面文本，或者写一段说明）" />
-          <button id="chatSend">发送</button>
+          <input id="chatInput" placeholder="Ask the assistant (e.g. summarize the text below or write a short description)" />
+          <button id="chatSend">Send</button>
         </div>
       </div>
     </section>
 
     <section id="logs">
-      <h2>日志</h2>
+      <h2>Logs</h2>
       <pre id="logArea"></pre>
     </section>
 
     <footer>
-      <small>前端原型：会向后端 POST /analyze 获取拆分任务，随后可对单个子任务调用 /task 或 /execute_step 进行派发。</small>
+      <small>Frontend prototype: POSTs to the backend `/analyze` to get task splits, then can dispatch individual subtasks via `/task` or `/execute_step`.</small>
     </footer>
   </div>
 
