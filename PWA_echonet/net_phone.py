@@ -1,4 +1,5 @@
-# net_phone.py — PHONE CLIENT ONLY VERSION
+# net_phone.py — PHONE CLIENT ONLY VERSION (static/ + top-level service-worker)
+
 import os
 import json
 import requests
@@ -8,31 +9,46 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = Flask(__name__, static_folder="frontend", static_url_path="")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+STATIC_DIR = os.path.join(BASE_DIR, "static")          # Your frontend folder
+SW_FILE = os.path.join(BASE_DIR, "service-worker.js")  # Your PWA service worker
+
+# ⭐ Host static as root ("/")
+app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="/")
 CORS(app)
 
-# 💗 Your cluster entry node (only one needed)
+# ⭐ Cluster entry node Y O U choose
 CLUSTER_ENTRY = os.getenv("CLUSTER_ENTRY", "http://192.168.0.105:5001")
-
-# Simple user token
 USER_TOKEN = os.getenv("USER_TOKEN", "testtoken123")
 
 
+# ---------------------------------------------------------
+#  Serve PWA pages
+# ---------------------------------------------------------
+
 @app.route("/")
 def index():
-    return send_from_directory("frontend", "index.html")
+    return send_from_directory(STATIC_DIR, "index.html")
 
 
-# ====== PHONE → CLUSTER PROXY ENDPOINTS ======
+@app.route("/service-worker.js")
+def service_worker():
+    # must be served from root domain for PWA
+    return send_from_directory(BASE_DIR, "service-worker.js",
+                               mimetype="application/javascript")
+
+
+# ---------------------------------------------------------
+# PHONE → CLUSTER PROXY ENDPOINTS
+# ---------------------------------------------------------
 
 @app.route("/task", methods=["POST"])
 def proxy_task():
-    """Phone forwards tasks to the cluster entry node."""
-    payload = request.json or {}
     try:
         r = requests.post(
             f"{CLUSTER_ENTRY}/task",
-            json=payload,
+            json=request.json,
             headers={"X-User-Token": USER_TOKEN},
             timeout=60,
         )
@@ -43,12 +59,10 @@ def proxy_task():
 
 @app.route("/analyze", methods=["POST"])
 def proxy_analyze():
-    """Optional: let phone call cluster’s /analyze."""
-    payload = request.json or {}
     try:
         r = requests.post(
             f"{CLUSTER_ENTRY}/analyze",
-            json=payload,
+            json=request.json,
             headers={"X-User-Token": USER_TOKEN},
             timeout=60,
         )
@@ -70,14 +84,8 @@ def proxy_result(tid):
         return jsonify({"error": "cluster unreachable", "detail": str(e)}), 500
 
 
-# Serve static frontend files
-@app.route("/<path:path>")
-def static_proxy(path):
-    return send_from_directory("frontend", path)
-
-
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
-    print(f"📱 Phone client starting on 0.0.0.0:{port}")
-    print(f"➡️ Forwarding all cluster calls to: {CLUSTER_ENTRY}")
-    app.run(host="0.0.0.0", port=port)
+    print(f"📱 Phone client running at http://0.0.0.0:{port}")
+    print(f"➡️ Forwarding tasks to: {CLUSTER_ENTRY}")
+    app.run(host="0.0.0.0
