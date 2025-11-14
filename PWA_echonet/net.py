@@ -1,181 +1,83 @@
-import time
+# net_phone.py — PHONE CLIENT ONLY VERSION
+import os
 import json
-import socket
-import subprocess
-import threading
-from zeroconf import Zeroconf, ServiceInfo, ServiceBrowser
-from flask import Flask, jsonify
+import requests
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+from dotenv import load_dotenv
 
-# ----------------------------
-# CHANGE THIS PER DEVICE
-# ----------------------------
-NODE_ID = "phoneNode"
-PORT = 4321
-SKILLS = ["test-skill"]
-MAX_LOAD = 5
-current_load = 0
-# ----------------------------
+load_dotenv()
 
-DISCOVERED_NODES = {}   # <--- NEW: shared node table
+app = Flask(__name__, static_folder="frontend", static_url_path="")
+CORS(app)
+
+# 💗 Your cluster entry node (only one needed)
+CLUSTER_ENTRY = os.getenv("CLUSTER_ENTRY", "http://192.168.0.105:5001")
+
+# Simple user token
+USER_TOKEN = os.getenv("USER_TOKEN", "testtoken123")
 
 
-def get_local_ip():
-    """Get LAN IP address."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+@app.route("/")
+def index():
+    return send_from_directory("frontend", "index.html")
+
+
+# ====== PHONE → CLUSTER PROXY ENDPOINTS ======
+
+@app.route("/task", methods=["POST"])
+def proxy_task():
+    """Phone forwards tasks to the cluster entry node."""
+    payload = request.json or {}
     try:
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-    except:
-        ip = "127.0.0.1"
-    finally:
-        s.close()
-    return ip
-
-
-# ----- SAFE BATTERY IN TERMUX -----
-def get_battery():
-    """Get battery level using Termux API."""
-    try:
-        out = subprocess.check_output(["termux-battery-status"])
-        data = json.loads(out.decode())
-        return data.get("percentage")
-    except:
-        return None
-
-
-# ----- SAFE CPU IN TERMUX -----
-def get_cpu():
-    """Termux cannot access psutil CPU. Use /proc/stat safely."""
-    try:
-        out = subprocess.check_output("top -bn1 | head -n 5", shell=True)
-        text = out.decode().lower()
-        for line in text.splitlines():
-            if "%cpu" in line:
-                num = "".join(ch for ch in line if ch.isdigit() or ch == '.')
-                return float(num) if num else 0.0
-        return 0.0
-    except:
-        return 0.0
-
-
-def compute_health(cpu, battery, load):
-    score = 1.0
-    if cpu > 80: score -= 0.3
-    if cpu > 50: score -= 0.15
-
-    if battery is not None:
-        if battery < 20: score -= 0.4
-        elif battery < 50: score -= 0.2
-
-    if load > MAX_LOAD * 0.7: score -= 0.2
-    elif load > MAX_LOAD * 0.5: score -= 0.1
-
-    return max(score, 0)
-
-
-def get_node_metrics():
-    cpu = get_cpu()
-    battery = get_battery()
-    health = compute_health(cpu, battery, current_load)
-
-    return {
-        "cpu": cpu,
-        "battery": battery,
-        "load": current_load,
-        "max_load": MAX_LOAD,
-        "health": health,
-    }
-
-
-class DiscoveryListener:
-    def add_service(self, zc, service_type, name):
-        info = zc.get_service_info(service_type, name)
-        if not info:
-            return
-
-        node_id = info.properties[b"id"].decode()
-        if node_id == NODE_ID:
-            return  # ignore ourselves
-
-        skills = json.loads(info.properties[b"skills"].decode())
-        metrics = json.loads(info.properties[b"metrics"].decode())
-        node_ip = socket.inet_ntoa(info.addresses[0])
-
-        # store in global table
-        DISCOVERED_NODES[node_id] = {
-            "id": node_id,
-            "ip": node_ip,
-            "port": info.port,
-            "skills": skills,
-            "metrics": metrics,
-            "timestamp": time.time()
-        }
-
-        print(f"\n✨ FOUND NODE → {node_id} @ {node_ip}:{info.port}")
-        print(f"   skills:  {skills}")
-        print(f"   cpu:     {metrics['cpu']}")
-        print(f"   battery: {metrics['battery']}")
-        print(f"   load:    {metrics['load']}/{metrics['max_load']}")
-        print(f"   health:  {metrics['health']:.2f}")
-
-    def update_service(self, *a): pass
-    def remove_service(self, *a): pass
-
-
-def advertiser_thread():
-    """Advertise updated metrics every ~3 seconds."""
-    zc = Zeroconf(ip_version=4)
-    ip = get_local_ip()
-
-    while True:
-        metrics = get_node_metrics()
-
-        props = {
-            "id": NODE_ID,
-            "skills": json.dumps(SKILLS),
-            "metrics": json.dumps(metrics),
-        }
-
-        info = ServiceInfo(
-            "_echotest._tcp.local.",
-            f"{NODE_ID}._echotest._tcp.local.",
-            addresses=[socket.inet_aton(ip)],
-            port=PORT,
-            properties=props,
+        r = requests.post(
+            f"{CLUSTER_ENTRY}/task",
+            json=payload,
+            headers={"X-User-Token": USER_TOKEN},
+            timeout=60,
         )
-
-        zc.register_service(info)
-        time.sleep(3)
-        zc.unregister_service(info)
-
-
-# ----------------------------
-#       FLASK API
-# ----------------------------
-app = Flask(__name__)
-
-@app.get("/nodes")
-def get_nodes():
-    # remove stale nodes after 10 sec
-    now = time.time()
-    dead = [k for k,v in DISCOVERED_NODES.items() if now - v["timestamp"] > 10]
-    for k in dead: del DISCOVERED_NODES[k]
-
-    return jsonify(list(DISCOVERED_NODES.values()))
+        return jsonify(r.json()), r.status_code
+    except Exception as e:
+        return jsonify({"error": "cluster unreachable", "detail": str(e)}), 500
 
 
-# ----------------------------
-#       MAIN ENTRY
-# ----------------------------
+@app.route("/analyze", methods=["POST"])
+def proxy_analyze():
+    """Optional: let phone call cluster’s /analyze."""
+    payload = request.json or {}
+    try:
+        r = requests.post(
+            f"{CLUSTER_ENTRY}/analyze",
+            json=payload,
+            headers={"X-User-Token": USER_TOKEN},
+            timeout=60,
+        )
+        return jsonify(r.json()), r.status_code
+    except Exception as e:
+        return jsonify({"error": "cluster unreachable", "detail": str(e)}), 500
+
+
+@app.route("/result/<tid>", methods=["GET"])
+def proxy_result(tid):
+    try:
+        r = requests.get(
+            f"{CLUSTER_ENTRY}/result/{tid}",
+            headers={"X-User-Token": USER_TOKEN},
+            timeout=60,
+        )
+        return jsonify(r.json()), r.status_code
+    except Exception as e:
+        return jsonify({"error": "cluster unreachable", "detail": str(e)}), 500
+
+
+# Serve static frontend files
+@app.route("/<path:path>")
+def static_proxy(path):
+    return send_from_directory("frontend", path)
+
+
 if __name__ == "__main__":
-    # advertiser
-    threading.Thread(target=advertiser_thread, daemon=True).start()
-
-    # browser
-    zc = Zeroconf(ip_version=4)
-    ServiceBrowser(zc, "_echotest._tcp.local.", DiscoveryListener())
-
-    print("\n🔥 Node running... Zeroconf + API online...\n")
-
-    # Flask web server
-    app.run(host="0.0.0.0", port=PORT)
+    port = int(os.getenv("PORT", "5000"))
+    print(f"📱 Phone client starting on 0.0.0.0:{port}")
+    print(f"➡️ Forwarding all cluster calls to: {CLUSTER_ENTRY}")
+    app.run(host="0.0.0.0", port=port)
